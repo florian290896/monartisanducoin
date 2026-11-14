@@ -60,12 +60,34 @@ jobs:
           QA_ROLE: ${{ matrix.role }}
         run: |
           umask 077
-          cd "$QA_PRIVATE_ROOT"
-          if [ "$QA_ROLE" = client ]; then
-            bash qa-ios/capture_authenticated_ios.sh > "$RUNNER_TEMP/private-native.log" 2>&1
-          else
-            bash qa-ios/capture_provider_ios48.sh > "$RUNNER_TEMP/private-native.log" 2>&1
-          fi
+          python3 - <<'PY'
+          import pathlib,subprocess,os,time,sys
+          root=pathlib.Path(os.environ['QA_PRIVATE_ROOT'])
+          temp=pathlib.Path(os.environ['RUNNER_TEMP'])
+          role=os.environ['QA_ROLE']
+          script='capture_authenticated_ios.sh' if role=='client' else 'capture_provider_ios48.sh'
+          output=temp/('madc-native-auth47' if role=='client' else 'madc-native-provider48')
+          with (temp/'private-native.log').open('wb') as log:
+              child=subprocess.Popen(['bash',str(root/'qa-ios'/script)],cwd=root,stdout=log,stderr=subprocess.STDOUT)
+              while child.poll() is None:
+                  phase='dependencies_and_analysis'
+                  raw=output/'native-integration.raw.log'
+                  if raw.exists():
+                      text=raw.read_text(errors='replace')
+                      phase='native_compile'
+                      if 'Xcode build done.' in text: phase='native_test_startup'
+                      if 'MADC_QA_NATIVE_COORDINATION_STARTED' in text: phase='native_permission_helper_startup'
+                      if 'MADC_QA_NATIVE_COORDINATION_READY' in text: phase='native_user_flow'
+                      if 'All tests passed' in text: phase='native_flow_passed_finishing_capture'
+                      if 'Test failed.' in text: phase='native_test_failed_collecting_diagnostics'
+                  elif (output/'helper-build.log').exists(): phase='build_native_permission_helper'
+                  elif (output/'simulator-boot.log').exists(): phase='boot_simulator'
+                  print('QA phase: '+phase,flush=True)
+                  time.sleep(15)
+              code=child.wait()
+          print('Native QA process exit: '+str(code),flush=True)
+          sys.exit(code)
+          PY
       - name: Encrypt private results
         if: always()
         run: |
