@@ -11,12 +11,8 @@ concurrency:
   cancel-in-progress: false
 jobs:
   native:
-    strategy:
-      fail-fast: false
-      matrix:
-        role: [client, provider]
     runs-on: macos-15
-    timeout-minutes: 35
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - name: Load temporary private QA input
@@ -36,7 +32,7 @@ jobs:
                   assert not p.is_absolute() and '..' not in p.parts
               z.extractall(root)
           source=next(p for p in root.iterdir() if p.is_dir())
-          assert (source/'qa-ios/mon-artisan-ios-1.0.25-49.zip').is_file()
+          assert (source/'qa-ios/mon-artisan-ios-1.0.25-50.zip').is_file()
           with open(os.environ['GITHUB_ENV'],'a') as output: output.write('QA_PRIVATE_ROOT='+str(source)+'\n')
           PY
       - uses: subosito/flutter-action@v2
@@ -57,37 +53,36 @@ jobs:
       - name: Execute private native tests
         env:
           MADC_EXISTING_REVIEW_ACCESS_BASE64: ${{ secrets.MADC_QA_ACCESS_20261114 }}
-          QA_ROLE: ${{ matrix.role }}
         run: |
           umask 077
-          python3 - <<'PY'
+          python3 - <<'PYCODE'
           import pathlib,subprocess,os,time,sys
           root=pathlib.Path(os.environ['QA_PRIVATE_ROOT'])
           temp=pathlib.Path(os.environ['RUNNER_TEMP'])
-          role=os.environ['QA_ROLE']
-          script='capture_authenticated_ios.sh' if role=='client' else 'capture_provider_ios48.sh'
-          output=temp/('madc-native-auth47' if role=='client' else 'madc-native-provider48')
+          child_env=os.environ.copy()
+          child_env['MADC_QA_SHARED_SOURCE_DIR']=str(temp/'madc-shared-review50')
           with (temp/'private-native.log').open('wb') as log:
-              child=subprocess.Popen(['bash',str(root/'qa-ios'/script)],cwd=root,stdout=log,stderr=subprocess.STDOUT)
-              while child.poll() is None:
-                  phase='dependencies_and_analysis'
-                  raw=output/'native-integration.raw.log'
-                  if raw.exists():
-                      text=raw.read_text(errors='replace')
-                      phase='native_compile'
-                      if 'Xcode build done.' in text: phase='native_test_startup'
-                      if 'MADC_QA_NATIVE_COORDINATION_STARTED' in text: phase='native_permission_helper_startup'
-                      if 'MADC_QA_NATIVE_COORDINATION_READY' in text: phase='native_user_flow'
-                      if 'All tests passed' in text: phase='native_flow_passed_finishing_capture'
-                      if 'Test failed.' in text: phase='native_test_failed_collecting_diagnostics'
-                  elif (output/'helper-build.log').exists(): phase='build_native_permission_helper'
-                  elif (output/'simulator-boot.log').exists(): phase='boot_simulator'
-                  print('QA phase: '+phase,flush=True)
-                  time.sleep(15)
-              code=child.wait()
-          print('Native QA process exit: '+str(code),flush=True)
-          sys.exit(code)
-          PY
+              for role,script,folder in [('client','capture_authenticated_ios.sh','madc-native-auth47'),('provider','capture_provider_ios48.sh','madc-native-provider48')]:
+                  output=temp/folder
+                  child=subprocess.Popen(['bash',str(root/'qa-ios'/script)],cwd=root,env=child_env,stdout=log,stderr=subprocess.STDOUT)
+                  while child.poll() is None:
+                      phase='dependencies_and_analysis'
+                      raw=output/'native-integration.raw.log'
+                      if raw.exists():
+                          try: text=raw.read_text(errors='replace')
+                          except FileNotFoundError: text=''
+                          phase='native_compile'
+                          if 'Xcode build done.' in text: phase='native_test_startup'
+                          if (output/'helper-test.log').exists(): phase='native_user_flow'
+                          if 'Test failed.' in text: phase='native_test_failed_collecting_diagnostics'
+                      elif (output/'helper-build.log').exists(): phase='build_native_permission_helper'
+                      elif (output/'simulator-boot.log').exists(): phase='boot_simulator'
+                      print('QA '+role+' phase: '+phase,flush=True)
+                      time.sleep(15)
+                  code=child.wait()
+                  print(role+' native QA process exit: '+str(code),flush=True)
+                  if code: sys.exit(code)
+          PYCODE
       - name: Encrypt private results
         if: always()
         run: |
@@ -107,7 +102,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: encrypted-apple-qa-${{ matrix.role }}
+          name: encrypted-apple-qa-complete
           path: ${{ runner.temp }}/encrypted-results/
           retention-days: 1
           if-no-files-found: error
