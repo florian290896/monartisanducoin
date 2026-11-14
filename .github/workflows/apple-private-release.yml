@@ -1,0 +1,101 @@
+name: Apple private signed candidate 50
+on:
+  push:
+    branches: [qa/apple-mac-20261114]
+    paths: ['.github/workflows/apple-private-release.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: apple-private-release-50
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load temporary private QA input
+        env:
+          QA_SOURCE_URL: ${{ secrets.MADC_RELEASE_SOURCE_URL_20261114 }}
+        run: |
+          umask 077
+          python3 - <<'PY' > "$RUNNER_TEMP/private-input.log" 2>&1
+          import os,urllib.request,zipfile,pathlib
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'private-input'
+          root.mkdir()
+          archive=root/'input.zip'
+          with urllib.request.urlopen(os.environ['QA_SOURCE_URL'],timeout=120) as response: archive.write_bytes(response.read())
+          with zipfile.ZipFile(archive) as z:
+              for name in z.namelist():
+                  p=pathlib.Path(name)
+                  assert not p.is_absolute() and '..' not in p.parts
+              z.extractall(root)
+          source=next(p for p in root.iterdir() if p.is_dir())
+          assert (source/'qa-ios/mon-artisan-ios-1.0.25-50.zip').is_file()
+          with open(os.environ['GITHUB_ENV'],'a') as output: output.write('QA_PRIVATE_ROOT='+str(source)+'\n')
+          PY
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.7'
+          channel: stable
+          cache: false
+      - name: Select available Xcode
+        run: |
+          python3 - <<'PY'
+          import pathlib,re,os
+          choices=[]
+          for p in pathlib.Path('/Applications').glob('Xcode_*.app'):
+              m=re.fullmatch(r'Xcode_([0-9.]+)\.app',p.name)
+              if m and int(m[1].split('.')[0])>=26: choices.append((tuple(map(int,m[1].split('.'))),p))
+          with open(os.environ['GITHUB_ENV'],'a') as output: output.write('DEVELOPER_DIR='+str(max(choices)[1]/'Contents/Developer')+'\n')
+          PY
+      - name: Build signed candidate without uploading
+        env:
+          MADC_SIGNING_BASE64: ${{ secrets.MADC_RELEASE_SIGNING_20261114 }}
+        run: |
+          umask 077
+          python3 - <<'PYCODE'
+          import pathlib,subprocess,os,time,sys,json,base64
+          root=pathlib.Path(os.environ['QA_PRIVATE_ROOT'])
+          temp=pathlib.Path(os.environ['RUNNER_TEMP'])
+          signing=json.loads(base64.b64decode(os.environ['MADC_SIGNING_BASE64'],validate=True))
+          assert set(signing)=={'MADC_IOS_DISTRIBUTION_P12','MADC_IOS_P12_PASSWORD','MADC_IOS_PROVISIONING_PROFILE'}
+          child_env=os.environ.copy();child_env.update(signing)
+          child_env.pop('MADC_SIGNING_BASE64',None)
+          with (temp/'private-release.log').open('wb') as log:
+              child=subprocess.Popen(['bash',str(root/'qa-ios/build_signed_candidate50.sh')],cwd=root,env=child_env,stdout=log,stderr=subprocess.STDOUT)
+              while child.poll() is None:
+                  print('QA phase: signed_candidate_build',flush=True)
+                  time.sleep(15)
+              code=child.wait()
+          print('Signed candidate process exit: '+str(code),flush=True)
+          sys.exit(code)
+          PYCODE
+      - name: Encrypt private results
+        if: always()
+        run: |
+          umask 077
+          mkdir -p "$RUNNER_TEMP/encrypted-results"
+          python3 - <<'PY'
+          import pathlib,os,tarfile
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])
+          with tarfile.open(root/'private-results.tar.gz','w:gz') as archive:
+              for pattern in ['madc-appstore50','private-release.log','private-input.log']:
+                  p=root/pattern
+                  if p.exists(): archive.add(p,arcname=p.name)
+          PY
+          openssl rand -hex 32 > "$RUNNER_TEMP/result-key"
+          openssl enc -aes-256-cbc -salt -pbkdf2 -in "$RUNNER_TEMP/private-results.tar.gz" -out "$RUNNER_TEMP/encrypted-results/results.enc" -pass file:"$RUNNER_TEMP/result-key"
+          openssl pkeyutl -encrypt -pubin -inkey .github/results-public.pem -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -in "$RUNNER_TEMP/result-key" -out "$RUNNER_TEMP/encrypted-results/key.enc"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: encrypted-apple-release-50
+          path: ${{ runner.temp }}/encrypted-results/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Remove temporary private input
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/private-input" "$RUNNER_TEMP/result-key" "$RUNNER_TEMP/private-results.tar.gz"
