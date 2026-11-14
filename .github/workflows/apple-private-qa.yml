@@ -1,9 +1,12 @@
 name: Apple private QA on standard Mac
 on:
-  push:
-    branches: [qa/apple-mac-20261114]
-    paths: ['.github/workflows/apple-private-qa.yml']
   workflow_dispatch:
+    inputs:
+      role:
+        description: Native capture role
+        type: choice
+        default: both
+        options: [both, client, provider]
 permissions:
   contents: read
 concurrency:
@@ -12,7 +15,7 @@ concurrency:
 jobs:
   native:
     runs-on: macos-15
-    timeout-minutes: 50
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Load temporary private QA input
@@ -51,8 +54,10 @@ jobs:
           with open(os.environ['GITHUB_ENV'],'a') as output: output.write('DEVELOPER_DIR='+str(max(choices)[1]/'Contents/Developer')+'\n')
           PY
       - name: Execute private native tests
+        timeout-minutes: 52
         env:
           MADC_EXISTING_REVIEW_ACCESS_BASE64: ${{ secrets.MADC_QA_ACCESS_20261114 }}
+          QA_CAPTURE_ROLE: ${{ inputs.role || 'both' }}
         run: |
           umask 077
           python3 - <<'PYCODE'
@@ -61,8 +66,12 @@ jobs:
           temp=pathlib.Path(os.environ['RUNNER_TEMP'])
           child_env=os.environ.copy()
           child_env['MADC_QA_SHARED_SOURCE_DIR']=str(temp/'madc-shared-review50')
+          selected=os.environ['QA_CAPTURE_ROLE']
+          assert selected in ['both','client','provider']
+          roles=[('client','capture_authenticated_ios.sh','madc-native-auth47'),('provider','capture_provider_ios48.sh','madc-native-provider48')]
           with (temp/'private-native.log').open('wb') as log:
-              for role,script,folder in [('client','capture_authenticated_ios.sh','madc-native-auth47'),('provider','capture_provider_ios48.sh','madc-native-provider48')]:
+              for role,script,folder in roles:
+                  if selected!='both' and role!=selected: continue
                   output=temp/folder
                   child=subprocess.Popen(['bash',str(root/'qa-ios'/script)],cwd=root,env=child_env,stdout=log,stderr=subprocess.STDOUT)
                   while child.poll() is None:
