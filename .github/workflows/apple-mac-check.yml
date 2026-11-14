@@ -9,10 +9,16 @@ permissions:
 jobs:
   check:
     runs-on: macos-15
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v4
       - name: Check Apple test tools without private application data
         run: |
           xcodebuild -version
           xcrun simctl list runtimes
           ruby -rxcodeproj -e 'puts "Xcode project tooling available"'
+      - name: Validate native UI permission helper
+        run: |
+          ruby .github/prepare_permission_helper.rb "$RUNNER_TEMP/helper"
+          device="$(xcrun simctl list devices available -j | python3 -c 'import json,sys;d=json.load(sys.stdin);print(next(x["udid"] for devices in d["devices"].values() for x in devices if x["name"].startswith("iPhone")))')"
+          xcodebuild build-for-testing -project "$RUNNER_TEMP/helper/PermissionHelper.xcodeproj" -scheme PermissionHelper -destination "id=$device" -derivedDataPath "$RUNNER_TEMP/helper-build" CODE_SIGNING_ALLOWED=NO
